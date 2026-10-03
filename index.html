@@ -152,7 +152,7 @@ button,select{font:inherit}
           <div class="mini">安打、保送、失誤、野手選擇等成為跑者後，追到得分／被殺／殘壘／代跑。</div>
         </div>
         <div>
-          <button class="btn primary" id="syncAll">重新同步全季上壘結果</button>
+          <button class="btn primary" id="syncAll">重新同步缺漏上壘結果</button>
           <button class="btn secondary" id="exportRunner">匯出 CSV</button>
         </div>
       </div>
@@ -401,7 +401,7 @@ function pairAndParsePBP(gamePk,allPlays){
  }
  return fates;
 }
-async function fetchJSON(url,timeoutMs=9000){
+async function fetchJSON(url,timeoutMs=20000){
  const controller=new AbortController();
  const timer=setTimeout(()=>controller.abort(),timeoutMs);
  try{
@@ -411,12 +411,21 @@ async function fetchJSON(url,timeoutMs=9000){
  } finally { clearTimeout(timer); }
 }
 async function syncPBP(gamePk,full=false){
- const api=full?`https://statsapi.mlb.com/api/v1.1/game/${gamePk}/feed/live`:`https://statsapi.mlb.com/api/v1/game/${gamePk}/playByPlay`;
- const js=await fetchJSON(api);
+ const urls=full
+   ? [`https://statsapi.mlb.com/api/v1.1/game/${gamePk}/feed/live`,`https://statsapi.mlb.com/api/v1/game/${gamePk}/playByPlay`]
+   : [`https://statsapi.mlb.com/api/v1/game/${gamePk}/playByPlay`,`https://statsapi.mlb.com/api/v1.1/game/${gamePk}/feed/live`];
+ let js=null,lastErr=null,used="";
+ for(const api of urls){
+   try{
+     js=await fetchJSON(api,20000); used=api; break;
+   }catch(e){ lastErr=e; }
+ }
+ if(!js)throw lastErr||new Error("MLB Gameday 連線失敗");
  const allPlays=js?.liveData?.plays?.allPlays || js?.allPlays || [];
+ if(!allPlays.length)throw new Error("MLB Gameday 無逐打席資料");
  const fates=pairAndParsePBP(gamePk,allPlays);
- const meta={};
- if(full){
+ const meta={source:used.includes("/feed/live")?"feed/live":"playByPlay"};
+ if(used.includes("/feed/live")){
    meta.weather=js?.gameData?.weather||null; meta.venue=js?.gameData?.venue?.name||"";
    meta.gameDateUTC=js?.gameData?.datetime?.dateTime||"";
    meta.firstPitch=js?.gameData?.gameInfo?.firstPitch||"";
@@ -460,17 +469,66 @@ async function syncOfficialGameLog(){
 }
 $("#syncGameLog").onclick=syncOfficialGameLog;
 
+let seasonSyncRunning=false;
 async function syncAll(){
- const ids=DATA.games.filter(g=>g.pas.some(p=>p.reach)).map(g=>g.gamePk).filter(id=>!runnerCache[id]);
- let done=0,fail=0; $("#syncAllMsg").textContent=`待同步 ${ids.length} 場…`;
- const workers=Array.from({length:Math.min(4,ids.length)},async()=>{
-   while(ids.length){
-     const id=ids.shift();
-     try{await syncPBP(id,false)}catch(e){fail++}
-     done++; const pctv=done/(done+ids.length)*100; $("#syncAllProgress").style.width=`${pctv}%`;$("#syncAllMsg").textContent=`完成 ${done} 場，失敗 ${fail} 場`;
+ if(seasonSyncRunning)return;
+ seasonSyncRunning=true;
+ try{
+   const targets=DATA.games
+     .filter(g=>g.pas.some(p=>p.reach))
+     .map(g=>g.gamePk)
+     .filter(id=>!runnerCache[id]);
+
+   if(!targets.length){
+     $("#syncAllMsg").textContent="全季上壘結果已同步完成";
+     $("#syncAllProgress").style.width="100%";
+     renderReachTable();
+     return;
    }
- });
- await Promise.all(workers); renderReachTable(); $("#syncAllMsg").textContent=`全季同步完成：成功 ${done-fail}，失敗 ${fail}`;
+
+   let pending=[...targets], finished=0;
+   const total=targets.length;
+   $("#syncAllMsg").textContent=`背景同步 0 / ${total} 場…`;
+
+   for(let round=1;round<=3 && pending.length;round++){
+     const queue=[...pending], retry=[];
+     const workerCount=Math.min(2,queue.length);
+     const workers=Array.from({length:workerCount},async()=>{
+       while(queue.length){
+         const id=queue.shift();
+         try{
+           await syncPBP(id,false);
+           finished++;
+           renderReachTable();
+           if(currentGame?.gamePk===id){renderRunner();renderGamePaTable();}
+         }catch(e){
+           retry.push(id);
+         }
+         const resolved=total-retry.length-queue.length;
+         const pctv=Math.max(2,Math.min(100,(resolved/total)*100));
+         $("#syncAllProgress").style.width=`${pctv}%`;
+         $("#syncAllMsg").textContent=`背景同步 ${Math.min(total,finished)} / ${total} 場${round>1?` · 第 ${round} 次重試`:""}…`;
+         await new Promise(r=>setTimeout(r,250));
+       }
+     });
+     await Promise.all(workers);
+     pending=retry;
+     if(pending.length && round<3){
+       $("#syncAllMsg").textContent=`還有 ${pending.length} 場未取得，稍後自動重試…`;
+       await new Promise(r=>setTimeout(r,1500*round));
+     }
+   }
+
+   renderReachTable();
+   if(!pending.length){
+     $("#syncAllProgress").style.width="100%";
+     $("#syncAllMsg").textContent=`全季上壘結果同步完成，共 ${total} 場`;
+   }else{
+     $("#syncAllMsg").textContent=`已完成 ${total-pending.length} / ${total} 場；${pending.length} 場 MLB 連線暫時失敗，可按「重新同步」再試`;
+   }
+ } finally {
+   seasonSyncRunning=false;
+ }
 }
 $("#syncAll").onclick=syncAll;
 
@@ -478,7 +536,7 @@ function allReachRows(){
  const arr=[];DATA.games.forEach(g=>g.pas.filter(p=>p.reach).forEach(p=>{
    const c=runnerCache[p.gamePk]?.fates?.[p.id];
    arr.push({date:p.date,gamePk:p.gamePk,pa:p.paInGame,method:p.reachMethod||p.eventLabel,initial:p.initialBase,
-    fate:c?.fateLabel||(p.event==="home_run"?"得分（全壘打）":"待同步"),final:c?.finalBase|| (p.event==="home_run"?"score":""),
+    fate:c?.fateLabel||(p.event==="home_run"?"得分（全壘打）":(seasonSyncRunning?"同步中…":"尚未取得")),final:c?.finalBase|| (p.event==="home_run"?"score":""),
     path:c?.path||[],desc:c?.officialDescription||""});
  }));return arr;
 }
@@ -508,7 +566,7 @@ $("#prevPa").onclick=()=>{let i=currentGame.pas.findIndex(p=>p.id===currentPA.id
 $("#nextPa").onclick=()=>{let i=currentGame.pas.findIndex(p=>p.id===currentPA.id); if(i<currentGame.pas.length-1){$("#paSel").value=currentGame.pas[i+1].id;currentPitch=0;renderExplorer()}};
 
 renderKpis();populateDates();renderAnalytics();renderXBH();renderReachTable();
-setTimeout(()=>{syncAll().catch(()=>{});},1200);
+setTimeout(()=>{syncAll().catch(()=>{});},1800);
 
 </script>
 </body>
