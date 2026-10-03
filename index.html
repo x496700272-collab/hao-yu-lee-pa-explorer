@@ -152,11 +152,11 @@ button,select{font:inherit}
           <div class="mini">安打、保送、失誤、野手選擇等成為跑者後，追到得分／被殺／殘壘／代跑。</div>
         </div>
         <div>
-          <button class="btn primary" id="syncAll">同步全季上壘結果</button>
+          <button class="btn primary" id="syncAll">重新同步全季上壘結果</button>
           <button class="btn secondary" id="exportRunner">匯出 CSV</button>
         </div>
       </div>
-      <div class="syncbar"><span id="syncAllMsg">尚未同步的場次會顯示「待同步」</span><div class="progress"><i id="syncAllProgress"></i></div></div>
+      <div class="syncbar"><span id="syncAllMsg">頁面開啟後會自動補齊全季上壘結果</span><div class="progress"><i id="syncAllProgress"></i></div></div>
       <input class="search" id="reachSearch" placeholder="搜尋日期、上壘方式、得分、封殺…">
       <div class="table-card"><table class="data-table"><thead><tr>
         <th>日期</th><th>PA</th><th>上壘方式</th><th>起始</th><th>最終結果</th><th>最後壘包</th><th>路徑</th><th>官方描述</th>
@@ -308,7 +308,7 @@ function renderGamePaTable(){
  $("#gamePaBody").innerHTML=currentGame.pas.map(p=>{
    const cache=runnerCache[currentGame.gamePk]?.fates?.[p.id];
    let cls=p.event==="home_run"||["double","triple"].includes(p.event)?"xbh":p.event==="single"?"hit":p.event?.includes("strikeout")?"k":"out";
-   let fate=p.reach?(cache?.fateLabel|| (p.event==="home_run"?"得分（全壘打）":"待同步")):"—";
+   let fate=p.reach?(cache?.fateLabel|| (p.event==="home_run"?"得分（全壘打）":"同步中…")):"—";
    return `<tr class="${p.id===currentPA.id?"sel":""}" data-pa="${p.id}"><td>${p.paInGame}</td><td>${p.inning}${p.half==="Top"?"上":"下"}</td><td>${p.pitches.length}</td><td><span class="tag ${cls}">${esc(p.eventLabel)}</span></td><td>${esc(milestoneText(p))}</td><td>${esc(fate)}</td></tr>`;
  }).join("");
  [...document.querySelectorAll("#gamePaBody tr")].forEach(tr=>tr.onclick=()=>{$("#paSel").value=tr.dataset.pa;currentPitch=0;renderExplorer()});
@@ -325,7 +325,7 @@ function renderRunner(){
    return
  }
  if(!c){
-   $("#runnerFate").textContent="待同步 MLB Gameday";
+   $("#runnerFate").textContent="正在同步 MLB Gameday…";
    $("#runnerPath").innerHTML=`<span class="step">${esc(p.reachMethod||"上壘")}</span><span class="arrow">→</span><span class="step">${esc(p.initialBase||"1B")}</span><span class="arrow">→</span><span class="step">?</span>`;
    $("#officialDesc").textContent="按「同步本場 MLB Gameday」即可追蹤得分、殘壘、封殺、盜壘失敗、牽制或代跑。";
    return
@@ -461,7 +461,7 @@ async function syncOfficialGameLog(){
 $("#syncGameLog").onclick=syncOfficialGameLog;
 
 async function syncAll(){
- const ids=DATA.games.map(g=>g.gamePk).filter(id=>!runnerCache[id]);
+ const ids=DATA.games.filter(g=>g.pas.some(p=>p.reach)).map(g=>g.gamePk).filter(id=>!runnerCache[id]);
  let done=0,fail=0; $("#syncAllMsg").textContent=`待同步 ${ids.length} 場…`;
  const workers=Array.from({length:Math.min(4,ids.length)},async()=>{
    while(ids.length){
@@ -508,6 +508,7 @@ $("#prevPa").onclick=()=>{let i=currentGame.pas.findIndex(p=>p.id===currentPA.id
 $("#nextPa").onclick=()=>{let i=currentGame.pas.findIndex(p=>p.id===currentPA.id); if(i<currentGame.pas.length-1){$("#paSel").value=currentGame.pas[i+1].id;currentPitch=0;renderExplorer()}};
 
 renderKpis();populateDates();renderAnalytics();renderXBH();renderReachTable();
+setTimeout(()=>{syncAll().catch(()=>{});},1200);
 
 </script>
 </body>
